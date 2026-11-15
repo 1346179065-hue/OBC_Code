@@ -1,0 +1,41 @@
+#
+# obc base config
+#
+
+
+config OBC_BASE
+	bool
+	default y
+	help
+	  uboot support obc base config
+
+config BOARD_CONFIG_AM62X
+	bool
+	depends on PLATFORM_AM62X || SOC_K3_AM625
+	default y
+
+config BOARD_CONFIG_IMX6ULL
+	bool
+	depends on PLATFORM_IMX6ULL || TARGET_MX6ULL_14X14_EVK
+	default y
+
+config BOARD_CONFIG_RV1106
+	bool
+	default y if PLATFORM_RV1106
+
+config BOARD_CONFIG_RK3562
+	bool
+	default y if PLATFORM_RK3562
+
+config OBC_BASE_TIBOOT
+	bool  "Emable obc boot ti boot config"
+    depends on OBC_BASE
+	help
+	  uboot support obc base ti boot config
+
+config OBC_BASE_TIUBOOT
+	bool "Emable obc boot ti uboot config"
+    depends on OBC_BASE
+	select IMAGE_SPARSE
+	help
+	  uboot support obc base ti uboot config

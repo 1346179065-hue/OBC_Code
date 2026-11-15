@@ -1,0 +1,12 @@
+
+
+
+
+
+
+menu "Sign Tools"
+
+config TOOLS_SIGN
+	bool "Build OBC sign tools"
+	default y
+endmenu

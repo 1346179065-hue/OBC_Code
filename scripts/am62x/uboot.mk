@@ -1,0 +1,117 @@
+AM62X_UBOOT_TMP := $(OBC_PACK_DIR)/$(subst ",,$(CONFIG_UBOOT_BIN_NAME))
+AM62X_TISPL_TMP := $(OBC_PACK_DIR)/$(subst ",,$(CONFIG_TISPL_BIN_NAME))
+AM62X_FDT_SOURCE := $(OBC_TOP_DIR)/dts/am62x/k3-am625-sk.dts
+AM62X_FDT_TMP := $(OBC_PACK_DIR)/$(subst ",,$(CONFIG_FDT_BIN_NAME))
+AM62X_FDT_IMAGE := $(call OBC_UPGRADE_IMAGE,fdt)
+AM62X_FDT_BUILD_DIR := $(OBC_TOP_DIR)/dts/am62x
+AM62X_FDT_BUILT := $(AM62X_FDT_BUILD_DIR)/k3-am625-sk.dtb
+AM62X_FDT_PREPROCESSED := $(AM62X_FDT_BUILD_DIR)/k3-am625-sk.temp.dts
+AM62X_CPP := $(shell command -v cpp 2>/dev/null)
+AM62X_DTC := $(firstword $(shell command -v dtc 2>/dev/null) \
+	$(wildcard $(OBC_TOOLCHAIN_ROOT)/bin/dtc) \
+	$(wildcard $(OBC_TOOLCHAIN_ROOT)/opt/gcc-arm-none-eabi/bin/dtc))
+AM62X_TOOLCHAIN_BIN := $(OBC_TOOLCHAIN_ROOT)/bin
+AM62X_UBOOT_IMAGE := $(call OBC_UPGRADE_IMAGE,uboot)
+AM62X_TISPL_IMAGE := $(call OBC_UPGRADE_IMAGE,teeos)
+AM62X_LEGACY_FDT_IMAGE := $(OBC_PACK_IMAGE_DIR)/100p-fdt.bin
+AM62X_LEGACY_UBOOT_IMAGE := $(OBC_PACK_IMAGE_DIR)/100p-uboot.bin
+AM62X_LEGACY_TISPL_IMAGE := $(OBC_PACK_IMAGE_DIR)/100p-teeos.bin
+# OBC is the source of truth for the U-Boot configuration.  Do not use the
+# SDK's configs/am62x_evm_a53_defconfig here: uboot_build installs this OBC
+# config as .config and expands it with olddefconfig.
+AM62X_UBOOT_CONFIG := $(OBC_TOP_DIR)/platform_config/am62x/sdk_config/uboot-am62x-defconfig
+
+# The configured tiboot3 variant determines which main-domain images are
+# bootable on the target. TI K3 GP devices must use the unsigned FIT images;
+# signed FIT payloads start with an X.509 certificate and cannot be executed
+# when the A53 SPL does not enable FIT image post-processing.
+ifneq ($(findstring -gp-,$(CONFIG_R5_LOADER_BIN_NAME)),)
+AM62X_DEVICE_TYPE := GP
+AM62X_UBOOT_SOURCE := $(UBOOT_SDK_DIR)/$(subst ",,$(CONFIG_UBOOT_BIN_NAME))_unsigned
+AM62X_TISPL_SOURCE := $(UBOOT_SDK_DIR)/$(subst ",,$(CONFIG_TISPL_BIN_NAME))_unsigned
+else
+AM62X_DEVICE_TYPE := HS
+AM62X_UBOOT_SOURCE := $(UBOOT_SDK_DIR)/$(subst ",,$(CONFIG_UBOOT_BIN_NAME))
+AM62X_TISPL_SOURCE := $(UBOOT_SDK_DIR)/$(subst ",,$(CONFIG_TISPL_BIN_NAME))
+endif
+
+OBCBASE_SOURCE := $(OBC_TOP_DIR)/bootloader/obcbase
+OBCBASE_SDK := $(UBOOT_SDK_DIR)/obcbase
+# The SDK sources under common/spl and the shared AM62x interfaces already use
+# OBC naming.  Keep them out of the temporary restore list so a build does not
+# turn the committed OBC names back into the legacy EMS names.
+OBCBASE_PATCH_FILES := Kconfig Makefile dts/upstream/src/arm64/ti/k3-am625-sk.dts
+
+.PHONY: uboot uboot_build uboot_build_install uboot_build_clean fdt_build fdt_build_clean obcbase_sync obcbase_clean
+uboot: uboot_build_install
+
+uboot_build: check_sdk output fdt_build
+	@set -eu; \
+	export PATH="$(AM62X_TOOLCHAIN_BIN):$$PATH"; \
+	cleanup() { \
+		git -C "$(UBOOT_SDK_DIR)" restore -- $(OBCBASE_PATCH_FILES); \
+		find "$(UBOOT_SDK_DIR)/obcbase" -depth -type f -delete 2>/dev/null || true; \
+		find "$(UBOOT_SDK_DIR)/obcbase" -depth -type d -empty -delete 2>/dev/null || true; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	$(MAKE) obcbase_sync; \
+	if [ ! -f "$(AM62X_UBOOT_CONFIG)" ]; then echo "ERROR: U-Boot defconfig not found: $(AM62X_UBOOT_CONFIG)"; exit 1; fi; \
+	cp "$(AM62X_UBOOT_CONFIG)" "$(UBOOT_SDK_DIR)/.config"; \
+	$(MAKE) -C "$(UBOOT_SDK_DIR)" olddefconfig ARCH=arm CROSS_COMPILE="$(OBC_TOOLCHAIN_PREFIX)" $(UBOOT_TOOLCHAIN_VARS); \
+	$(MAKE) -C "$(UBOOT_SDK_DIR)" -j$$(nproc) all ARCH=arm CROSS_COMPILE="$(OBC_TOOLCHAIN_PREFIX)" $(UBOOT_TOOLCHAIN_VARS)
+
+obcbase_sync: check_sdk
+	@set -eu; \
+	if [ ! -d "$(OBCBASE_SOURCE)" ]; then echo "ERROR: OBC base source not found: $(OBCBASE_SOURCE)"; exit 1; fi; \
+	mkdir -p "$(OBCBASE_SDK)"; \
+	find "$(OBCBASE_SDK)" -type f -delete; \
+	cp -a "$(OBCBASE_SOURCE)/." "$(OBCBASE_SDK)/"; \
+	for f in $(OBCBASE_PATCH_FILES); do \
+		sed -i -e 's#emsbase#obcbase#g' -e 's/CONFIG_EMS_/CONFIG_OBC_/g' -e 's/EMS_PACK/OBC_PACK/g' -e 's/EMS_MAGIC/OBC_MAGIC/g' -e 's/EMS_HEADER/OBC_HEADER/g' -e 's/EMSFS/OBCFS/g' -e 's/emspart/obcpart/g' -e 's/ems_/obc_/g' -e 's/ems-/obc-/g' -e 's/do_emsboot/do_obcboot/g' "$(UBOOT_SDK_DIR)/$$f"; \
+	done
+
+obcbase_clean:
+	@set -eu; \
+	git -C "$(UBOOT_SDK_DIR)" restore -- $(OBCBASE_PATCH_FILES); \
+	find "$(OBCBASE_SDK)" -depth -type f -delete 2>/dev/null || true; \
+	find "$(OBCBASE_SDK)" -depth -type d -empty -delete 2>/dev/null || true
+
+fdt_build: check_config output
+	@set -eu; \
+	export PATH="$(AM62X_TOOLCHAIN_BIN):$$PATH"; \
+	if [ ! -f "$(AM62X_FDT_SOURCE)" ]; then echo "ERROR: DTS source not found: $(AM62X_FDT_SOURCE)"; exit 1; fi; \
+	if [ -z "$(AM62X_CPP)" ] || [ ! -x "$(AM62X_CPP)" ]; then echo "ERROR: cpp not found; install a host C preprocessor"; exit 1; fi; \
+	if [ -z "$(AM62X_DTC)" ] || [ ! -x "$(AM62X_DTC)" ]; then echo "ERROR: dtc not found; add the AM62x toolchain bin directory to PATH"; exit 1; fi; \
+	"$(AM62X_CPP)" \
+		-I"$(OBC_TOP_DIR)/dts/am62x" \
+		-I"$(KERNEL_SDK_DIR)/include" \
+		-I"$(KERNEL_SDK_DIR)/include/uapi" \
+		-I"$(KERNEL_SDK_DIR)/arch/arm64/boot/dts" \
+		-I"$(KERNEL_SDK_DIR)/arch/arm64/boot/dts/ti" \
+		-x assembler-with-cpp -P "$(AM62X_FDT_SOURCE)" -o "$(AM62X_FDT_PREPROCESSED)"; \
+	"$(AM62X_DTC)" -I dts -O dtb -o "$(AM62X_FDT_BUILT)" "$(AM62X_FDT_PREPROCESSED)"; \
+	echo "Built device tree sources: $(AM62X_FDT_PREPROCESSED) $(AM62X_FDT_BUILT)"
+
+fdt_build_clean:
+	rm -f "$(AM62X_FDT_TMP)" "$(AM62X_FDT_IMAGE)" "$(AM62X_LEGACY_FDT_IMAGE)"
+
+uboot_build_install: sign_tools uboot_build
+	@set -eu; \
+	uboot_src="$(AM62X_UBOOT_SOURCE)"; \
+	tispl_src="$(AM62X_TISPL_SOURCE)"; \
+	if [ ! -f "$$uboot_src" ]; then echo "ERROR: $(AM62X_DEVICE_TYPE) U-Boot image not found: $$uboot_src"; exit 1; fi; \
+	if [ ! -f "$$tispl_src" ]; then echo "ERROR: $(AM62X_DEVICE_TYPE) TI SPL image not found: $$tispl_src"; exit 1; fi; \
+	if [ ! -f "$(AM62X_FDT_BUILT)" ]; then echo "ERROR: device tree output not found: $(AM62X_FDT_BUILT)"; exit 1; fi; \
+	echo "Using $(AM62X_DEVICE_TYPE) boot images: $$(basename "$$tispl_src") $$(basename "$$uboot_src")"; \
+	rm -f "$(AM62X_LEGACY_UBOOT_IMAGE)" "$(AM62X_LEGACY_TISPL_IMAGE)" "$(AM62X_LEGACY_FDT_IMAGE)"; \
+	cp "$$uboot_src" "$(AM62X_UBOOT_TMP)"; cp "$$tispl_src" "$(AM62X_TISPL_TMP)"; cp "$(AM62X_FDT_BUILT)" "$(AM62X_FDT_TMP)"; \
+	$(MAKE) -C "$(OBC_TOP_DIR)" pack-signed PACK_INPUT="$(AM62X_UBOOT_TMP)" PACK_OUTPUT="$(AM62X_UBOOT_IMAGE)" PACK_HEAD_WRITE=1; \
+	$(MAKE) -C "$(OBC_TOP_DIR)" pack-signed PACK_INPUT="$(AM62X_TISPL_TMP)" PACK_OUTPUT="$(AM62X_TISPL_IMAGE)" PACK_HEAD_WRITE=1; \
+	$(MAKE) -C "$(OBC_TOP_DIR)" pack-signed PACK_INPUT="$(AM62X_FDT_TMP)" PACK_OUTPUT="$(AM62X_FDT_IMAGE)" PACK_HEAD_WRITE=1
+
+uboot_build_clean: fdt_build_clean obcbase_clean
+	-$(MAKE) -C "$(UBOOT_SDK_DIR)" clean
+	rm -f "$(AM62X_UBOOT_TMP)" "$(AM62X_TISPL_TMP)" \
+		"$(AM62X_UBOOT_IMAGE)" "$(AM62X_TISPL_IMAGE)" \
+		"$(AM62X_LEGACY_UBOOT_IMAGE)" "$(AM62X_LEGACY_TISPL_IMAGE)"
+uboot_clean: uboot_build_clean

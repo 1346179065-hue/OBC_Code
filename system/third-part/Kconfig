@@ -1,0 +1,23 @@
+config TOOLS_IPERF
+	bool "Build iperf"
+	default n
+
+config TOOLS_MBW
+	bool "Build mbw"
+	default n
+
+config TOOLS_GDB
+	bool "Build gdb"
+	default n
+
+config TOOLS_AUDIT
+	bool "Build audit"
+	default n
+
+config TOOLS_BUSYBOX
+	bool "Build busybox"
+	default n
+
+config TOOLS_V4L_UTILS
+	bool "Build v4l utils"
+	default n

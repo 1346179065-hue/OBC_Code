@@ -1,0 +1,463 @@
+# OBC SDK
+
+OBC SDK 是一个面向嵌入式 Linux 板卡的统一构建框架。它使用 Kconfig 管理平台、工具、应用和内核模块配置，并通过 Makefile 组织以下构建阶段：
+
+- TI AM62x 启动链（R5 Loader、A53 U-Boot、设备树）
+- Linux Kernel
+- 基于 BusyBox 的根文件系统
+- appfs 应用和第三方组件
+- 内核模块
+- OBC 签名工具和工厂镜像打包工具
+
+当前版本：`obc-1.0.0`（`CONFIG_OBC_SDK_VERSION="1.0.0"`）。
+
+> 当前实现状态：AM62x 支持完整构建；i.MX6ULL 和 RK3562 支持平台资源构建及 OBC 签名。`rv1106` 和 `platdemo` 尚未接入顶层构建。下文的完整构建命令以 AM62x 为例。
+
+## 目录结构
+
+```text
+OBC_Code/
+├── README.md
+├── obc-1.0.0/
+│   ├── Makefile                 # 顶层构建入口
+│   ├── Kconfig                  # 平台和组件配置
+│   ├── platform_config/         # 各平台 defconfig 和 SDK 子配置
+│   ├── scripts/                 # 通用及平台构建规则
+│   │   ├── am62x/               # AM62x loader/U-Boot/Kernel/rootfs 规则
+│   │   ├── imx6ull/             # i.MX6ULL 平台规则
+│   │   └── rk3562/              # RK3562 平台规则
+│   ├── bootloader/obcbase/      # OBC U-Boot 扩展代码
+│   ├── dts/am62x/               # AM62x 设备树源文件
+│   ├── rootfs/                  # BusyBox、基础 rootfs 和打包脚本
+│   ├── system/appfs/            # 可选应用
+│   ├── system/third-part/       # 可选第三方组件
+│   ├── module/                  # 可选内核模块
+│   ├── tools/sign_tools/        # obc_sign/unsign_demo
+│   ├── tools/mkkimg/            # 工厂镜像打包/解包工具
+│   ├── tools/cgroup-tool/       # autocgroup、bsp_mem 等工具源码
+│   └── output/                  # 构建过程中生成的文件（不应提交）
+└── obc_sdk/                     # 外部 SDK（默认位于 obc-1.0.0/../obc_sdk）
+    └── am62x_sdk_source/
+        ├── uboot/
+        └── kernel/
+```
+
+## 构建前准备
+
+### 主机依赖
+
+```sh
+sudo apt install build-essential gcc g++ make \
+    kconfig-frontends device-tree-compiler fakeroot e2fsprogs
+```
+
+其中：
+
+- `kconfig-mconf` 由 `kconfig-frontends` 提供，用于 `make menuconfig`。
+- `cpp` 和 `dtc` 用于编译 AM62x 设备树。
+- `fakeroot`、`mkfs.ext2` 用于生成根文件系统镜像。
+- rootfs 构建优先使用 `/usr/bin/fakeroot`，避免 `PATH` 中的交叉工具链同名脚本覆盖系统版。若需指定其他版本，可用 `./build.sh rootfs FAKEROOT=/path/to/fakeroot`。Ubuntu 24.04 的系统版也可通过 `FAKEROOT=/usr/bin/fakeroot-sysv` 指定。
+
+构建 AM62x Loader 还要求主机能找到 `arm-none-eabi-gcc`：
+
+```sh
+command -v arm-none-eabi-gcc
+command -v kconfig-mconf
+command -v dtc
+command -v mkfs.ext2
+```
+
+### 外部 SDK 和交叉工具链
+
+AM62x 默认配置使用：
+
+```text
+SDK 名称：       am62x_sdk_source
+交叉编译前缀：   aarch64-ca53-linux-gnu-
+目标架构：       arm64
+```
+
+推荐目录布局：
+
+```text
+/home/shanyan-hu/justxiaoyan/OBC_Code/
+├── obc-1.0.0/
+└── obc_sdk/
+    └── am62x_sdk_source/
+        ├── uboot/
+        ├── kernel/
+        └── ti-k3-boot-firmware-*/   # 或 uboot/binman-fake/
+```
+
+`OBC_SDK_DIR` 的查找顺序为：
+
+1. `../obc_sdk/am62x_sdk_source`
+2. `../am62x_sdk_source`
+3. `../../am62x_sdk_source`
+
+SDK 必须至少包含 `uboot/` 和 `kernel/` 目录；构建 Loader 时还需要 TI K3 firmware 目录。交叉编译器必须位于 `PATH` 中，或通过环境配置使 `aarch64-ca53-linux-gnu-gcc` 可执行。
+
+## 配置
+
+### 选择平台
+
+```sh
+cd /home/shanyan-hu/justxiaoyan/OBC_Code/obc-1.0.0
+make platform
+```
+
+菜单当前列出：
+
+| 选项 | 平台 | 顶层构建状态 |
+| ---: | --- | --- |
+| 1 | `imx6ull` | U-Boot、Kernel、设备树及签名已接入 |
+| 3 | `rk3562` | loader、U-Boot、Kernel Image、rootfs 和工厂包已接入；设备树暂缓 |
+| 2 | `rv1106` | 构建已启用的 appfs 应用；默认只构建 LVGL，不要求外部 SDK |
+| 4 | `am62x` | 当前已接入 |
+| 5 | `platdemo` | 缺少对应 defconfig，不能使用 |
+
+`make platform` 会：
+
+1. 将 `platform_config/<platform>/<platform>_defconfig` 复制为工程根目录 `.config`。
+2. 当 Loader、U-Boot、Kernel 或 rootfs 构建开关有启用时，检查外部 SDK 的根目录、`uboot/` 和 `kernel/`。
+3. 需要外部 SDK 时，将平台 SDK 配置复制到外部 SDK 的 `uboot/.config` 和 `kernel/.config`（文件存在时）。
+
+它不会编译源码，也不会生成 `output/` 镜像。
+
+### i.MX6ULL 资源构建
+
+将 `imx6ull_sdk_source/` 放在 `OBC_Code/` 同级目录。`build.sh` 默认使用 `~/toolchain/imx6ull-host/bin` 中的 `arm-buildroot-linux-gnueabihf-gcc`；其他安装位置可通过 `IMX6ULL_TOOLCHAIN_ROOT` 指定。选定 i.MX6ULL 后执行：
+
+```sh
+./build.sh uboot
+./build.sh kernel
+```
+
+构建结果为 `output/image/imx6ull-uboot.bin`、`imx6ull-kernel.bin`、`imx6ull-fdt.bin`、`imx6ull-rootfs.bin` 和 `imx6ull-factory.bin`。i.MX6ULL 不需要 AM62x 的 loader 和 teeos 资源。
+这些镜像目前只验证了编译和签名；板上启动与刷写流程尚未验证。
+
+### RK3562 资源构建
+
+将 `rk3562_sdk_source/` 放在 `OBC_Code/` 同级目录，其中应有 `uboot/`、
+`kernel/`，以及 U-Boot SDK 自带的 `rkbin/`。交叉编译器前缀默认为
+`aarch64-buildroot-linux-gnu-`；`build.sh` 默认从 `~/toolchain/rk3562-host/bin`
+查找，可通过 `RK3562_TOOLCHAIN_ROOT=/path/to/toolchain` 指定其他位置。
+该 SDK 自带 sysroot，编译器会自动定位到 `rk3562-host/aarch64-buildroot-linux-gnu/sysroot`。
+Rockchip 内核脚本还会调用 `python`、`flex`、`bison` 和 `lz4`；FIT 打包还需
+主机 `fdtget`。Ubuntu 上可安装
+`python-is-python3 flex bison lz4 device-tree-compiler`。选定 RK3562 后执行：
+
+```sh
+./build.sh platform             # 选择 3；复制 SDK 的 U-Boot/Kernel 配置
+./build.sh uboot                # Rockchip uboot.img 和使用本次 SPL 的 loader
+./build.sh kernel               # 只生成 arm64 Image，暂不编译 Kernel DTB
+./build.sh rootfs               # 通用 BusyBox sparse ext4 rootfs
+./build.sh factory              # 汇总并签名上述资源
+```
+
+原生镜像位于 SDK 的 `uboot/`、`kernel/` 及 `output/tmp/`；OBC 升级镜像位于
+`output/image/rk3562-{loader,uboot,kernel,rootfs,factory}.bin`。
+U-Boot 使用 RK3562 SDK 的 `make.sh` 打包 FIT `uboot.img`，并使用本次编译的
+`spl/u-boot-spl.bin` 重新打包 loader；FIT 打包使用 SDK 已构建的
+`scripts/dtc/dtc`。Kernel 当前只构建 `arch/arm64/boot/Image`，不生成
+Rockchip `boot.img` 或独立 FDT 镜像。U-Boot 自身仍会构建其内置 DTB。
+RK3562 的 Kernel 和 rootfs 子构建会使用工具链 `lib/` 中的主机运行库，
+供 SDK 自带的 Python 编译包装脚本运行。
+当前 RK3562 U-Boot
+未接入 OBC 板级启动及 `updatex`；`output/image/` 中带 OBC 头的镜像仅供
+OBC 升级协议使用，不能直接作为 Rockchip 原厂烧录工具的输入。板上启动和
+刷写流程尚需验证。
+
+### 使用 menuconfig
+
+```sh
+make menuconfig
+```
+
+如果 `kconfig-mconf` 不在 `PATH` 中，可以显式指定：
+
+```sh
+make KCONFIG_MCONF=/path/to/kconfig-mconf menuconfig
+```
+
+可配置项目包括：
+
+- 平台、工具链和镜像文件名；Loader、U-Boot、Kernel、rootfs 可单独控制是否加入 `make all`
+- appfs 应用
+- iperf、mbw、GDB、audit、BusyBox、v4l-utils
+- `shared_memory` 内核模块
+
+## AM62x 构建流程
+
+首次构建建议执行：
+
+```sh
+cd /home/shanyan-hu/justxiaoyan/OBC_Code/obc-1.0.0
+
+# 1. 选择 AM62x 并初始化 .config
+make platform                 # 选择 4
+
+# 2. 按需调整工具、appfs 和模块
+make menuconfig
+
+# 3. 构建签名和工厂镜像工具
+make tools
+
+# 4. 构建全部组件
+make all
+```
+
+`make all` 的实际依赖顺序为：
+
+```text
+tools → loader → uboot → kernel → rootfs → system → module → factory
+```
+
+AM62x 默认启用 Loader、U-Boot、Kernel 和 rootfs 四个构建开关。RV1106 默认关闭这四项，`make all` 只编译已启用的 appfs 应用，并将 LVGL 程序安装到 `output/appfs/obc_lvgl`。需要调整时，可在 `make menuconfig` 的 Build Configuration 中单独切换这些选项。
+
+Loader 和 U-Boot 会临时修改外部 U-Boot SDK 并在退出时恢复，因此顶层 `all` 被声明为不可并行执行。
+Rootfs 是独立的 32 MiB sparse ext4 分区镜像，属于 `all` 和 `factory` 的自动依赖，
+不再嵌入 kernel。
+
+### 单独构建目标
+
+```sh
+make tools       # sign_tools 和 mkkimg
+make loader      # AM62x Cortex-R5 Loader，并签名
+make uboot       # A53 U-Boot、tispl 和设备树，并签名
+make kernel      # 构建不含内置 rootfs 的 Image.gz，并签名
+make rootfs      # 构建并签名 32 MiB sparse ext4 rootfs
+make system      # appfs 和第三方组件
+make module      # 编译已启用的内核模块
+make factory     # 将六个已签名镜像打包为工厂镜像
+```
+
+Kernel 和 rootfs 可独立构建；修改 rootfs 后不需要重新构建 kernel：
+
+```sh
+make rootfs
+make kernel
+```
+
+`make_ext4fs` 默认从 `PATH` 查找，也可通过
+`make rootfs MAKE_EXT4FS=/path/to/make_ext4fs` 指定。Rootfs 的 staging、BusyBox、
+动态库、内核模块和应用安装仍在同一个 fakeroot 环境内完成。
+
+查看所有顶层目标：
+
+```sh
+make help
+```
+
+## 输出文件
+
+构建过程中会创建以下目录：
+
+```text
+output/
+├── tmp/                         # 标准化的中间镜像
+│   ├── tiboot3.bin
+│   ├── tispl.bin
+│   ├── u-boot.img
+│   ├── k3-am625-sk.dtb
+│   ├── Image.gz                    # 不含内置 rootfs
+│   └── rootfs.sparse.bin           # 32 MiB 逻辑容量的 sparse ext4
+├── image/                       # 带 OBC 头的分区镜像
+│   ├── am62x-loader.bin
+│   ├── am62x-teeos.bin
+│   ├── am62x-fdt.bin
+│   ├── am62x-uboot.bin
+│   ├── am62x-kernel.bin
+│   ├── am62x-rootfs.bin
+│   └── am62x-factory.bin
+├── appfs/                       # appfs 安装目录（单独执行 appfs install 时使用）
+└── modules/                     # 模块安装目录
+```
+
+启动链的标准文件名为：
+
+```text
+output/tmp/tiboot3.bin
+output/tmp/tispl.bin
+output/tmp/u-boot.img
+```
+
+AM62x GP 配置默认使用 `tispl.bin_unsigned` 和 `u-boot.img_unsigned` 作为 U-Boot 源文件，安装阶段统一改名为上面的标准文件名。Loader 使用 R5 binman 生成的 `tiboot3-am62x-gp-evm.bin`，安装时改名为 `tiboot3.bin`。
+
+AM62x 根文件系统由 `make_ext4fs -s -l 32M` 生成，并以 `head_write_flag=0`
+封装为 `output/image/am62x-rootfs.bin`。U-Boot 升级时校验并剥离 512 字节
+OBCFS 头，再将 sparse 内容展开到 `rootfs0` 和 `rootfs1`。
+
+AM62x 从 SD 或 eMMC 的 A/B rootfs 分区启动时，根文件系统以只读方式挂载。
+`/run` 和 `/tmp` 在早期启动阶段挂载为独立的易失性 tmpfs，其中 `/tmp` 权限为
+`1777`，因此程序仍可正常创建临时文件；这些文件在重启后不会保留。
+
+## 签名和工厂镜像
+
+### OBC 签名格式
+
+`tools/sign_tools` 生成的文件由以下部分组成：
+
+```text
+[512 字节 OBCFS 头] + [原始二进制数据]
+```
+
+头部包含魔数 `OBCFS`、原始文件大小、CRC16、文件名和 `head_write_flag`。各构建阶段的标志如下：
+
+| 镜像 | `head_write_flag` |
+| --- | ---: |
+| Loader | 0 |
+| FDT、TEE-OS、U-Boot、Kernel | 1 |
+| Rootfs | 0 |
+
+`am62x-factory.bin` 包含 Loader、FDT、TEE-OS、U-Boot、Kernel 和 Rootfs
+六个组件。`updatex up rootfs` 同时升级 `rootfs0` 和 `rootfs1`，并兼容旧的
+raw ext2 rootfs 包。
+
+手工使用：
+
+```sh
+cd tools/sign_tools
+make
+./output/obc_sign input.bin output.bin       # 不写入头部标志
+./output/obc_sign -h input.bin output.bin    # head_write_flag=1
+./output/unsign_demo output.bin              # 查看头部
+./output/unsign_demo output.bin raw.bin      # 解包并校验 CRC16
+```
+
+### 工厂镜像
+
+`make factory` 将以下六个签名镜像复制到 `output/tmp/factory-input/`，再使用
+`tools/mkkimg/output/mkkimg` 打包：
+
+```text
+<platform>-loader.bin
+<platform>-teeos.bin
+<platform>-fdt.bin
+<platform>-uboot.bin
+<platform>-kernel.bin
+<platform>-rootfs.bin
+```
+
+输出为：
+
+```text
+output/image/am62x-factory.bin
+```
+
+验证或解包工厂镜像：
+
+```sh
+tools/mkkimg/output/umkkimg output/image/am62x-factory.bin --info
+tools/mkkimg/output/umkkimg output/image/am62x-factory.bin --verify
+tools/mkkimg/output/umkkimg output/image/am62x-factory.bin --extract \
+    --output /tmp/am62x-extracted
+```
+
+## appfs、第三方组件和模块
+
+### appfs 应用
+
+`system/appfs/Kconfig` 当前提供以下可选项：
+
+```text
+tools-mem、tools-smart、tools-priority、LiteMonitor、StockMonitor、
+lvgl、camera-fb、pxp_demo、printf_test、upgrade
+```
+
+启用后，`make system` 会调用 `system/appfs/Makefile` 构建相应子目录。若要显式安装到 `output/appfs`，可执行：
+
+```sh
+make -C system/appfs install OBC_TOP_DIR=$PWD
+```
+
+部分历史应用仍使用固定的本机编译器或绝对路径交叉工具链，启用前请检查对应子目录的 Makefile。
+
+### 第三方组件
+
+可选组件和源码归档位于 `system/third-part/`：
+
+| Kconfig 选项 | 版本/目录 |
+| --- | --- |
+| `CONFIG_TOOLS_IPERF` | iperf 3.18 |
+| `CONFIG_TOOLS_MBW` | mbw（压缩包 `mbw-master.zip`） |
+| `CONFIG_TOOLS_GDB` | GDB 10.2 |
+| `CONFIG_TOOLS_AUDIT` | audit 3.1.4 |
+| `CONFIG_TOOLS_BUSYBOX` | BusyBox 1.36.1 |
+| `CONFIG_TOOLS_V4L_UTILS` | v4l-utils 1.22.1 |
+
+这些组件使用 `.config` 中的 `CONFIG_OBC_SDK_COMP` 推导交叉工具链前缀。启用组件后执行：
+
+```sh
+make system
+```
+
+### shared_memory 内核模块
+
+在 menuconfig 中启用：
+
+```text
+Kernel Modules → Enable shared_memory driver (/dev/shared_memory)
+```
+
+然后编译：
+
+```sh
+make module
+```
+
+模块源码位于 `module/shared_memory/`，默认目标名为 `multicore-shared-memory.ko`，使用外部 SDK 的 `kernel/` 目录进行内核模块编译。驱动要求设备树提供 `memory-region`，并提供：
+
+- `/dev/shared_memory` 字符设备
+- `mmap()` 映射保留内存
+- `SHMEM_IOC_GET_REGION_COUNT`
+- `SHMEM_IOC_GET_REGION_INFO`
+
+详细的设备树和用户态接口示例见 [`module/shared_memory/README.md`](obc-1.0.0/module/shared_memory/README.md)。当前顶层 `module` 目标负责编译，不会自动调用子模块的 `install` 目标；需要安装到 `output/modules` 时可执行：
+
+```sh
+make -C module/shared_memory install \
+    KERNEL_SDK_DIR=$PWD/../obc_sdk/am62x_sdk_source/kernel \
+    MODULE_OUTPUT_DIR=$PWD/output/modules
+```
+
+## 清理
+
+```sh
+make clean
+```
+
+也可以按阶段清理：
+
+```sh
+make loader_clean
+make uboot_clean
+make kernel_clean
+make rootfs_clean
+make system_clean
+make module_clean
+make tools_clean
+make factory_clean
+```
+
+这些目标会清理相应的构建目录和 OBC 输出；`uboot_clean`/`loader_clean` 还会清理外部 U-Boot SDK 的构建结果。
+
+## 已知限制和注意事项
+
+1. 顶层 Makefile 目前只有 `am62x` 分支；其他平台配置不能按当前 `make all` 流程构建。
+2. `platdemo` 在 `platform_config/` 下没有对应的 `platdemo_defconfig`。
+3. `make platform` 会覆盖工程 `.config`，并可能覆盖外部 SDK 的 `uboot/.config`、`kernel/.config`，请先备份手工修改。
+4. 当前没有顶层 `make install` 或 `make pack` 目标；各阶段构建目标会直接把签名结果写入 `output/tmp` 和 `output/image`，工厂镜像目标名为 `make factory`。
+5. `scripts/am62x/flash_tf_signed.sh` 保持原有 raw 写盘行为，不能用它的
+   `rootfs` 或 `all` 模式直接写入 sparse rootfs；TF 卡仅用于启动到 U-Boot，
+   rootfs 请通过 `updatex up rootfs` 升级。
+6. 外部 SDK、交叉工具链、TI K3 firmware、`make_ext4fs` 和
+   `arm-none-eabi-gcc` 均需用户预先准备，OBC 不会自动 clone 或下载这些资源。
+
+## 相关文档
+
+- [`obc-1.0.0/doc/obc-sdk-guide.md`](obc-1.0.0/doc/obc-sdk-guide.md)：平台配置流程和 SDK 路径说明
+- [`obc-1.0.0/doc/buildroot-am62x-sdk-guide.md`](obc-1.0.0/doc/buildroot-am62x-sdk-guide.md)：Buildroot AM62x 方案
+- [`obc-1.0.0/tools/sign_tools/README.md`](obc-1.0.0/tools/sign_tools/README.md)：OBCFS 签名格式和工具用法
+- [`obc-1.0.0/tools/cgroup-tool/README.md`](obc-1.0.0/tools/cgroup-tool/README.md)：autocgroup、bsp_mem 用法
+- [`obc-1.0.0/module/shared_memory/INTEGRATION.md`](obc-1.0.0/module/shared_memory/INTEGRATION.md)：shared_memory 模块集成背景（其中部分历史命令以当前顶层 Makefile 为准）

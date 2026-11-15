@@ -1,0 +1,57 @@
+menu "appfs Config"
+
+config APPFS_LITE_MONITOR
+	bool "Enable LiteMonitor"
+	default n
+	help
+	  Build the LiteMonitor application.
+
+config APPFS_STOCK_MONITOR
+	bool "Enable StockMonitor"
+	default n
+	help
+	  Build the StockMonitor application.
+
+config APPFS_LVGL
+	bool "Enable LVGL"
+	default n
+	help
+	  Build the LVGL graphics library applications.
+
+config APPFS_AMP_A53
+	bool "Enable AM62x A53 AMP application"
+	default n
+	help
+	  Build the FreeRTOS AMP image for the AM62x A53 core 3.
+
+config APPFS_CAMERA_FB
+	bool "Enable camera-fb"
+	default n
+	help
+	  Build the camera framebuffer application.
+
+config APPFS_PXP_DEMO
+	bool "Enable pxp_demo"
+	default n
+	help
+	  Build the PXP demo application.
+
+config APPFS_PRINTF_TEST
+	bool "Enable printf_test"
+	default n
+	help
+	  Build the printf test application.
+
+config APPFS_UPGRADE
+	bool "Enable upgrade"
+	default n
+	help
+	  Build the upgrade application.
+
+config APPFS_OBC_LINK_NODE
+	bool "Enable OBC link node"
+	default n
+	help
+	  Build the OBC link node application.
+
+endmenu
